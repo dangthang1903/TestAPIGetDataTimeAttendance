@@ -56,25 +56,25 @@ Lệnh này sẽ dùng `concurrently` để chạy song song 2 luồng:
 
 ---
 
-## 📦 Hướng Dẫn Đóng Gói Ra File Cài Đặt (.exe)
+## 📦 Hướng Dẫn Đóng Gói Ra File Cài Đặt (.exe cho Windows / .dmg cho Mac)
 
-Khi bạn đã sửa code xong và muốn xuất ra thành 1 file cài đặt để gửi cho khách hàng (nhân sự) cài vào máy tính của họ:
+Bản chất phần mềm sử dụng công nghệ **Electron** nên mã nguồn này có thể chạy và đóng gói được trên cả Windows, macOS và Linux. Tuy nhiên, file bạn vừa đóng gói ra có đuôi `.exe` **chỉ có thể chạy trên Windows**. 
 
-Mở Terminal tại **thư mục gốc**, gõ:
+Để tạo file cài đặt cho nền tảng nào, hệ thống sẽ gọi lệnh tương ứng:
 
+### 1. Build cho Windows (.exe)
+Mở Terminal tại thư mục gốc, gõ:
 ```bash
 npm run build:app
 ```
+*Kết quả:* File `.exe` sẽ xuất hiện trong thư mục `release/`.
 
-**Quá trình này diễn ra như sau:**
-- Đầu tiên sẽ build thư mục `backend` sang code Javascript thuần (`/backend/dist`).
-- Sau đó sẽ build thư mục `frontend` thành giao diện web tĩnh (`/frontend/dist`).
-- Cuối cùng, thư viện `electron-builder` sẽ gom toàn bộ code ở trên, đưa vào môi trường Chromium (Electron) và nén lại thành 1 file cài đặt Setup (NSIS).
-
-**Kết quả:**
-- Sau khi chạy xong, hãy vào thư mục `release/` (nằm ở thư mục gốc).
-- Bạn sẽ thấy file `.exe` ví dụ như: `Quản Lý Chấm Công Setup 0.0.1.exe`.
-- Đây là file cuối cùng dùng để cài đặt (Double-click là tự cài và có Icon ngoài Desktop).
+### 2. Build cho Macbook (.dmg / .app)
+**Lưu ý:** Để build ra app cho Mac, bạn bắt buộc phải **chạy lệnh này trên một máy tính Macbook** (vì Apple yêu cầu hệ điều hành macOS mới đóng gói được file `.dmg` chuẩn của họ). Người bạn dùng Macbook của bạn sau khi pull code về chỉ cần gõ:
+```bash
+npm run build:mac
+```
+*Kết quả:* File `.dmg` sẽ xuất hiện trong thư mục `release/`.
 
 ---
 
