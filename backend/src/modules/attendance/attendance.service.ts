@@ -402,7 +402,52 @@ export class AttendanceService {
     }
   }
 
+  async getAllAttendances(ip: string, commKey: number = 0, month?: number, year?: number): Promise<any[]> {
+    let zkInstance: any;
+    try {
+      zkInstance = await this.connectToDevice(ip, commKey);
+      const usersData = await zkInstance.getUsers();
+      const logsData = await zkInstance.getAttendances();
+      await zkInstance.disconnect();
 
+      const usersMap = new Map<string, string>();
+      if (usersData && usersData.data) {
+        usersData.data.forEach((u: any) => {
+          const uid = (u.userId ?? u.userid ?? u.uid ?? '').toString();
+          if (uid) usersMap.set(uid, u.name || `User ${uid}`);
+        });
+      }
+
+      let logs = logsData?.data || [];
+
+      // If month and year are provided, filter raw logs first to optimize
+      if (month && year) {
+        const targetMonthStart = new Date(year, month - 1, 1);
+        const targetMonthEnd = endOfMonth(targetMonthStart);
+        logs = logs.filter((log: any) => {
+          const timeStr = log.recordTime || log.time || log.timestamp;
+          if (!timeStr) return false;
+          const recordDate = new Date(timeStr);
+          if (isNaN(recordDate.getTime())) return false;
+          return isWithinInterval(recordDate, { start: targetMonthStart, end: targetMonthEnd });
+        });
+      }
+
+      let processedRows = processAttendanceData(logs, usersMap);
+
+      // Final sort by date then userId
+      processedRows.sort((a, b) => {
+        const dateCompare = b.date.localeCompare(a.date); // Descending date
+        if (dateCompare !== 0) return dateCompare;
+        return a.userId.localeCompare(b.userId);
+      });
+
+      return processedRows;
+    } catch (error: any) {
+      if (zkInstance) try { await zkInstance.disconnect(); } catch (e) {}
+      throw new Error(`Lỗi khi lấy toàn bộ chấm công: ${error.message || error}`);
+    }
+  }
 
   private async connectToDevice(ip: string, commKey: number = 0): Promise<any> {
     const zkInstance = new ZKLib(ip, 4370, 10000, 4000);

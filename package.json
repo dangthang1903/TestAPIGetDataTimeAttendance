@@ -5,24 +5,58 @@
   "author": "",
   "private": true,
   "license": "UNLICENSED",
+  "main": "electron-main.js",
+  "build": {
+    "appId": "com.hrm.attendance",
+    "productName": "Quản Lý Chấm Công",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "backend/dist/**/*",
+      "frontend/dist/**/*",
+      "electron-main.js",
+      "node_modules/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Phần Mềm Chấm Công"
+    }
+  },
   "scripts": {
-    "build": "nest build",
-    "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
-    "start": "nest start",
-    "start:dev": "nest start --watch",
-    "start:debug": "nest start --debug --watch",
-    "start:prod": "node dist/main",
-    "lint": "eslint \"{src,apps,libs,test}/**/*.ts\" --fix",
-    "test": "jest",
-    "test:watch": "jest --watch",
-    "test:cov": "jest --coverage",
+    "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "dev:backend": "cd backend && nest start --watch",
+    "dev:frontend": "cd frontend && npm run dev",
+    "build:frontend": "cd frontend && npm run build",
+    "build:backend": "cd backend && nest build",
+    "build:app": "npm run build:backend && npm run build:frontend && electron-builder --win",
+    "start:app": "npm run build:backend && npm run build:frontend && electron .",
+    "build": "cd backend && nest build",
+    "format": "prettier --write \"backend/src/**/*.ts\" \"backend/test/**/*.ts\"",
+    "start": "cd backend && nest start",
+    "start:dev": "cd backend && nest start --watch",
+    "start:debug": "cd backend && nest start --debug --watch",
+    "start:prod": "node backend/dist/main",
+    "lint": "eslint \"backend/{src,apps,libs,test}/**/*.ts\" --fix",
+    "test": "cd backend && jest",
+    "test:watch": "cd backend && jest --watch",
+    "test:cov": "cd backend && jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
-    "test:e2e": "jest --config ./test/jest-e2e.json"
+    "test:e2e": "cd backend && jest --config ./test/jest-e2e.json"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.1",
     "@nestjs/core": "^11.0.1",
     "@nestjs/platform-express": "^11.0.1",
+    "@nestjs/serve-static": "^5.0.5",
     "@nestjs/swagger": "^11.4.4",
     "date-fns": "^4.4.0",
     "exceljs": "^4.4.0",
@@ -41,6 +75,9 @@
     "@types/jest": "^30.0.0",
     "@types/node": "^24.0.0",
     "@types/supertest": "^7.0.0",
+    "concurrently": "^10.0.3",
+    "electron": "^42.4.1",
+    "electron-builder": "^26.15.3",
     "eslint": "^9.18.0",
     "eslint-config-prettier": "^10.0.1",
     "eslint-plugin-prettier": "^5.2.2",
@@ -54,7 +91,8 @@
     "ts-node": "^10.9.2",
     "tsconfig-paths": "^4.2.0",
     "typescript": "^5.7.3",
-    "typescript-eslint": "^8.20.0"
+    "typescript-eslint": "^8.20.0",
+    "wait-on": "^9.0.10"
   },
   "jest": {
     "moduleFileExtensions": [
@@ -62,7 +100,7 @@
       "json",
       "ts"
     ],
-    "rootDir": "src",
+    "rootDir": "backend/src",
     "testRegex": ".*\\.spec\\.ts$",
     "transform": {
       "^.+\\.(t|j)s$": "ts-jest"

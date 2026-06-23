@@ -41,6 +41,29 @@ export class AttendanceController {
     }
   }
 
+  @Get('logs')
+  @ApiOperation({ summary: 'Lấy toàn bộ dữ liệu chấm công của tháng' })
+  @ApiQuery({ name: 'ip', required: true, description: 'IP máy chấm công' })
+  @ApiQuery({ name: 'commKey', required: false, type: Number, description: 'Comm Key' })
+  @ApiQuery({ name: 'month', required: false, type: Number, description: 'Tháng' })
+  @ApiQuery({ name: 'year', required: false, type: Number, description: 'Năm' })
+  async getAllAttendances(
+    @Query('ip') ip: string,
+    @Query('commKey') commKey: string,
+    @Query('month') month: string,
+    @Query('year') year: string,
+  ) {
+    if (!ip) throw new HttpException('Thiếu tham số ip', HttpStatus.BAD_REQUEST);
+    try {
+      const parsedCommKey = commKey ? Number(commKey) : 0;
+      const parsedMonth = month ? Number(month) : undefined;
+      const parsedYear = year ? Number(year) : undefined;
+      return await this.attendanceService.getAllAttendances(ip, parsedCommKey, parsedMonth, parsedYear);
+    } catch (error: any) {
+      throw new HttpException(error.message, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
   @Get('users')
   @ApiOperation({ summary: 'Lấy danh sách tất cả nhân viên (có phân trang và tìm kiếm)' })
   @ApiQuery({ name: 'ip', required: true, description: 'IP máy chấm công' })
