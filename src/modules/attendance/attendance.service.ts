@@ -138,6 +138,94 @@ function patchZKInstance(zkInstance: any) {
   };
 }
 
+function processAttendanceData(logs: any[], usersMap: Map<string, string>) {
+  const reportData: any = {};
+  
+  // Group logs by User -> Date -> Times
+  logs.forEach((log: any) => {
+    if (log.deviceUserId === undefined || log.deviceUserId === null) return;
+    const userId = log.deviceUserId.toString();
+    const userName = usersMap.get(userId) || `User ${userId}`;
+    const timeStr = log.recordTime || log.time || log.timestamp;
+    const recordDate = new Date(timeStr);
+    if (isNaN(recordDate.getTime())) return;
+    
+    const dateStr = format(recordDate, 'yyyy-MM-dd');
+
+    if (!reportData[userId]) {
+      reportData[userId] = { name: userName, dailyRecords: {} };
+    }
+    if (!reportData[userId].dailyRecords[dateStr]) {
+      reportData[userId].dailyRecords[dateStr] = [];
+    }
+    reportData[userId].dailyRecords[dateStr].push(recordDate);
+  });
+
+  const processedRows: any[] = [];
+  const WORK_START = { hour: 8, minute: 0 };
+  const WORK_END = { hour: 17, minute: 0 };
+
+  for (const userId of Object.keys(reportData)) {
+    const userData = reportData[userId];
+    for (const dateStr of Object.keys(userData.dailyRecords)) {
+      const times = userData.dailyRecords[dateStr];
+      times.sort((a: Date, b: Date) => a.getTime() - b.getTime());
+
+      const checkIn = times[0];
+      const checkOut = times.length > 1 ? times[times.length - 1] : null;
+
+      let lateMinutes = 0;
+      let earlyLeaveMinutes = 0;
+      let workingHours = 0;
+
+      if (checkIn) {
+        const startLimit = new Date(checkIn);
+        startLimit.setHours(WORK_START.hour, WORK_START.minute, 0, 0);
+        if (checkIn > startLimit) {
+          lateMinutes = differenceInMinutes(checkIn, startLimit);
+        }
+      }
+
+      if (checkOut) {
+        const endLimit = new Date(checkOut);
+        endLimit.setHours(WORK_END.hour, WORK_END.minute, 0, 0);
+        if (checkOut < endLimit) {
+          earlyLeaveMinutes = differenceInMinutes(endLimit, checkOut);
+        }
+        
+        // Calculate working hours with 1 hour lunch break deduction if applicable
+        let diffMs = checkOut.getTime() - checkIn.getTime();
+        let diffHours = diffMs / (1000 * 60 * 60);
+        
+        // Deduct 1 hour lunch break if check-in is before 12:00 and check-out is after 13:00
+        const lunchStart = new Date(checkIn);
+        lunchStart.setHours(12, 0, 0, 0);
+        const lunchEnd = new Date(checkIn);
+        lunchEnd.setHours(13, 0, 0, 0);
+        
+        if (checkIn < lunchStart && checkOut > lunchEnd) {
+          diffHours -= 1;
+        }
+        workingHours = diffHours > 0 ? Number(diffHours.toFixed(2)) : 0;
+      }
+
+      processedRows.push({
+        userId,
+        name: userData.name,
+        date: dateStr,
+        checkIn: checkIn ? format(checkIn, 'HH:mm:ss') : '',
+        checkOut: checkOut ? format(checkOut, 'HH:mm:ss') : '',
+        lateMinutes,
+        earlyLeaveMinutes,
+        totalPunches: times.length,
+        workingHours
+      });
+    }
+  }
+
+  return processedRows;
+}
+
 @Injectable()
 export class AttendanceService {
   private readonly logger = new Logger(AttendanceService.name);
@@ -146,180 +234,160 @@ export class AttendanceService {
     let zkInstance: any;
     try {
       this.logger.log(`Connecting to ZKTeco device at ${ip}...`);
-      // parameters: ip, port, timeout, inport
-      zkInstance = new ZKLib(ip, 4370, 10000, 4000);
+      zkInstance = await this.connectToDevice(ip, commKey);
 
-      // Capture connect response to know if unauthenticated (2005)
-      let connectResponseCmd: number = 0;
-      if (zkInstance.jtcp) {
-        zkInstance.jtcp.connect = function() {
-          return new Promise(async (resolve, reject) => {
-            try {
-              const { COMMANDS } = require('zkh-lib/src/command');
-              const reply = await this.executeCmd(COMMANDS.CMD_CONNECT, '');
-              if (reply) {
-                connectResponseCmd = reply.readUInt16LE(0);
-                resolve(true);
-              } else {
-                reject(new Error('NO_REPLY_ON_CMD_CONNECT'));
-              }
-            } catch (err) {
-              reject(err);
-            }
-          });
-        };
-      }
-
-      await zkInstance.createSocket();
-      this.logger.log('Connected to ZKTeco successfully.');
-
-      // Patch the ZK instance immediately to avoid unhandled TypeError crash on socket timeouts
-      patchZKInstance(zkInstance);
-
-      // Authenticate if requested or required
-      const { COMMANDS } = require('zkh-lib/src/command');
-      if (connectResponseCmd === COMMANDS.CMD_ACK_UNAUTH || commKey !== 0) {
-        this.logger.log(`Device requires authentication (connect code: ${connectResponseCmd}). Sending CMD_AUTH...`);
-        const authKey = makeCommKey(commKey, zkInstance.jtcp.sessionId);
-        const authReply = await zkInstance.jtcp.executeCmd(COMMANDS.CMD_AUTH, authKey);
-        const authCmdId = authReply.readUInt16LE(0);
-        
-        if (authCmdId === COMMANDS.CMD_ACK_OK) {
-          this.logger.log('Authenticated successfully with ZKTeco device.');
-        } else {
-          throw new Error(`Authentication failed with ZKTeco device. Code: ${authCmdId}`);
-        }
-      }
-
-      // 1. Fetch Users from device
       this.logger.log('Fetching users from device...');
       const usersData = await zkInstance.getUsers();
       const usersMap = new Map<string, string>();
       if (usersData && usersData.data) {
         usersData.data.forEach((u: any) => {
-          // zkh-lib returns 'userId' (camelCase). Guard against undefined.
           const uid = (u.userId ?? u.userid ?? u.uid ?? '').toString();
           if (uid) usersMap.set(uid, u.name || `User ${uid}`);
         });
       }
 
-      // 2. Fetch Attendances from device
       this.logger.log('Fetching attendance logs from device...');
       const logsData = await zkInstance.getAttendances();
       let logs = logsData?.data || [];
 
-      // Disconnect safely
       await zkInstance.disconnect();
       this.logger.log('Disconnected from ZKTeco.');
 
-      // 3. Process Data
       const targetMonthStart = new Date(year, month - 1, 1);
       const targetMonthEnd = endOfMonth(targetMonthStart);
 
       // Filter logs by month and year
       logs = logs.filter((log: any) => {
-        const recordDate = typeof log.recordTime === 'string' ? parseISO(log.recordTime) : new Date(log.recordTime);
+        const timeStr = log.recordTime || log.time || log.timestamp;
+        if (!timeStr) return false;
+        const recordDate = new Date(timeStr);
+        if (isNaN(recordDate.getTime())) return false;
         return isWithinInterval(recordDate, { start: targetMonthStart, end: targetMonthEnd });
       });
 
-      // Group logs by User -> Date -> Times
-      const reportData: any = {};
-      logs.forEach((log: any) => {
-        // Guard against undefined deviceUserId
-        if (log.deviceUserId === undefined || log.deviceUserId === null) return;
-        const userId = log.deviceUserId.toString();
-        const userName = usersMap.get(userId) || `User ${userId}`;
-        const recordDate = typeof log.recordTime === 'string' ? parseISO(log.recordTime) : new Date(log.recordTime);
-        const dateStr = format(recordDate, 'yyyy-MM-dd');
+      // Process Data
+      const processedRows = processAttendanceData(logs, usersMap);
 
-        if (!reportData[userId]) {
-          reportData[userId] = {
-            name: userName,
-            dailyRecords: {}
-          };
-        }
-
-        if (!reportData[userId].dailyRecords[dateStr]) {
-          reportData[userId].dailyRecords[dateStr] = [];
-        }
-        reportData[userId].dailyRecords[dateStr].push(recordDate);
-      });
-
-      // Calculate work hours based on 08:00 - 17:00
-      const excelRows: any[] = [];
-      const WORK_START = { hour: 8, minute: 0 };
-      const WORK_END = { hour: 17, minute: 0 };
-
-      for (const userId of Object.keys(reportData)) {
-        const userData = reportData[userId];
-        
-        for (const dateStr of Object.keys(userData.dailyRecords)) {
-          const times = userData.dailyRecords[dateStr];
-          // Sort punches chronologically
-          times.sort((a: Date, b: Date) => a.getTime() - b.getTime());
-
-          const checkIn = times[0];
-          // If only 1 punch, checkOut is null (forgot to punch)
-          const checkOut = times.length > 1 ? times[times.length - 1] : null;
-
-          let lateMinutes = 0;
-          let earlyLeaveMinutes = 0;
-
-          if (checkIn) {
-            const startLimit = new Date(checkIn);
-            startLimit.setHours(WORK_START.hour, WORK_START.minute, 0, 0);
-            if (checkIn > startLimit) {
-              lateMinutes = differenceInMinutes(checkIn, startLimit);
-            }
-          }
-
-          if (checkOut) {
-            const endLimit = new Date(checkOut);
-            endLimit.setHours(WORK_END.hour, WORK_END.minute, 0, 0);
-            if (checkOut < endLimit) {
-              earlyLeaveMinutes = differenceInMinutes(endLimit, checkOut);
-            }
-          }
-
-          excelRows.push({
-            userId,
-            name: userData.name,
-            date: dateStr,
-            checkIn: checkIn ? format(checkIn, 'HH:mm:ss') : '',
-            checkOut: checkOut ? format(checkOut, 'HH:mm:ss') : '',
-            lateMinutes,
-            earlyLeaveMinutes,
-            totalPunches: times.length
+      // Group Data by User
+      const groupedByUsers = new Map<string, any>();
+      for (const row of processedRows) {
+        if (!groupedByUsers.has(row.userId)) {
+          groupedByUsers.set(row.userId, {
+            userId: row.userId,
+            name: row.name,
+            days: {},
+            totalWorkingHours: 0
           });
+        }
+        const u = groupedByUsers.get(row.userId);
+        u.days[row.date] = row;
+        u.totalWorkingHours += (row.workingHours || 0);
+      }
+
+      // Generate Excel using exceljs
+      const workbook = new ExcelJS.Workbook();
+      const sheet = workbook.addWorksheet('Bảng Chấm Công');
+
+      const daysInMonth = new Date(year, month, 0).getDate();
+      const weekdayNames = ['Chủ Nhật', 'Thứ 2', 'Thứ 3', 'Thứ 4', 'Thứ 5', 'Thứ 6', 'Thứ 7'];
+
+      // Row 1, 2, 3 Headers
+      sheet.getCell(1, 1).value = 'Mã NV';
+      sheet.mergeCells(1, 1, 3, 1);
+      sheet.getColumn(1).width = 10;
+
+      sheet.getCell(1, 2).value = 'Tên nhân viên';
+      sheet.mergeCells(1, 2, 3, 2);
+      sheet.getColumn(2).width = 25;
+
+      const headerFillNormal = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4F81BD' } };
+      const headerFillWeekend = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE26B0A' } }; // Orange for weekends
+      const fontWhiteBold = { bold: true, color: { argb: 'FFFFFFFF' } };
+
+      const styleCell = (r: number, c: number, fill: any) => {
+        const cell = sheet.getCell(r, c);
+        cell.fill = fill;
+        cell.font = fontWhiteBold;
+        cell.alignment = { vertical: 'middle', horizontal: 'center' };
+      };
+
+      for (let d = 1; d <= daysInMonth; d++) {
+        const startCol = 3 + (d - 1) * 5;
+        const endCol = startCol + 4;
+        const dayDate = new Date(year, month - 1, d);
+        const dayOfWeek = dayDate.getDay();
+        const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+        const fill = isWeekend ? headerFillWeekend : headerFillNormal;
+
+        // Dòng 1: Ngày
+        sheet.getCell(1, startCol).value = format(dayDate, 'dd/MM/yyyy');
+        sheet.mergeCells(1, startCol, 1, endCol);
+        styleCell(1, startCol, fill);
+
+        // Dòng 2: Thứ
+        sheet.getCell(2, startCol).value = weekdayNames[dayOfWeek];
+        sheet.mergeCells(2, startCol, 2, endCol);
+        styleCell(2, startCol, fill);
+
+        // Dòng 3: Columns
+        const subHeaders = ['In', 'Out', 'Trễ', 'Sớm', 'Quét'];
+        for (let i = 0; i < 5; i++) {
+          sheet.getCell(3, startCol + i).value = subHeaders[i];
+          styleCell(3, startCol + i, fill);
+          sheet.getColumn(startCol + i).width = 8;
         }
       }
 
-      // Sort rows by User Name, then by Date
-      excelRows.sort((a, b) => {
-        if (a.name !== b.name) return a.name.localeCompare(b.name);
-        return a.date.localeCompare(b.date);
-      });
+      const totalCol = 2 + daysInMonth * 5;
 
-      // 4. Generate Excel using exceljs
-      const workbook = new ExcelJS.Workbook();
-      const sheet = workbook.addWorksheet('Attendance Report');
+      // Style A1 and B1
+      styleCell(1, 1, headerFillNormal);
+      styleCell(1, 2, headerFillNormal);
 
-      sheet.columns = [
-        { header: 'Mã NV', key: 'userId', width: 10 },
-        { header: 'Tên nhân viên', key: 'name', width: 25 },
-        { header: 'Ngày', key: 'date', width: 15 },
-        { header: 'Check-In', key: 'checkIn', width: 15 },
-        { header: 'Check-Out', key: 'checkOut', width: 15 },
-        { header: 'Đi trễ (phút)', key: 'lateMinutes', width: 15 },
-        { header: 'Về sớm (phút)', key: 'earlyLeaveMinutes', width: 15 },
-        { header: 'Số lần quét', key: 'totalPunches', width: 15 },
-      ];
+      // Populate Data
+      let currentRow = 4;
+      const sortedUsers = Array.from(groupedByUsers.values()).sort((a, b) => a.name.localeCompare(b.name));
 
-      // Style the header row
-      sheet.getRow(1).font = { bold: true };
-      sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD3D3D3' } };
+      for (const u of sortedUsers) {
+        sheet.getCell(currentRow, 1).value = u.userId;
+        sheet.getCell(currentRow, 2).value = u.name;
 
-      sheet.addRows(excelRows);
+        for (let d = 1; d <= daysInMonth; d++) {
+          const dayDate = new Date(year, month - 1, d);
+          const dateStr = format(dayDate, 'yyyy-MM-dd');
+          const startCol = 3 + (d - 1) * 5;
+          
+          const dayData = u.days[dateStr];
+          if (dayData) {
+            sheet.getCell(currentRow, startCol).value = dayData.checkIn;
+            sheet.getCell(currentRow, startCol + 1).value = dayData.checkOut;
+            sheet.getCell(currentRow, startCol + 2).value = dayData.lateMinutes || '';
+            sheet.getCell(currentRow, startCol + 3).value = dayData.earlyLeaveMinutes || '';
+            sheet.getCell(currentRow, startCol + 4).value = dayData.totalPunches || '';
+          }
+        }
+        
+        currentRow++;
+      }
+
+      // Add borders and alignment to all data cells
+      for (let r = 1; r < currentRow; r++) {
+        for (let c = 1; c <= totalCol; c++) {
+          const cell = sheet.getCell(r, c);
+          cell.border = {
+            top: { style: 'thin', color: { argb: 'FFBFBFBF' } },
+            left: { style: 'thin', color: { argb: 'FFBFBFBF' } },
+            bottom: { style: 'thin', color: { argb: 'FFBFBFBF' } },
+            right: { style: 'thin', color: { argb: 'FFBFBFBF' } }
+          };
+          if (r >= 4) {
+             cell.alignment = { vertical: 'middle', horizontal: 'center' };
+          }
+        }
+      }
+
+      // Freeze top 3 rows and first 2 columns
+      sheet.views = [{ state: 'frozen', xSplit: 2, ySplit: 3 }];
 
       const buffer = await workbook.xlsx.writeBuffer();
       return buffer as unknown as Buffer;
@@ -334,80 +402,158 @@ export class AttendanceService {
     }
   }
 
-  async getRawAttendanceData(ip: string, commKey: number = 0, month?: number, year?: number): Promise<any> {
+
+
+  private async connectToDevice(ip: string, commKey: number = 0): Promise<any> {
+    const zkInstance = new ZKLib(ip, 4370, 10000, 4000);
+    let connectResponseCmd: number = 0;
+    if (zkInstance.jtcp) {
+      zkInstance.jtcp.connect = function() {
+        return new Promise(async (resolve, reject) => {
+          try {
+            const { COMMANDS } = require('zkh-lib/src/command');
+            const reply = await this.executeCmd(COMMANDS.CMD_CONNECT, '');
+            if (reply) {
+              connectResponseCmd = reply.readUInt16LE(0);
+              resolve(true);
+            } else {
+              reject(new Error('NO_REPLY_ON_CMD_CONNECT'));
+            }
+          } catch (err) {
+            reject(err);
+          }
+        });
+      };
+    }
+
+    await zkInstance.createSocket();
+    patchZKInstance(zkInstance);
+
+    const { COMMANDS } = require('zkh-lib/src/command');
+    if (connectResponseCmd === COMMANDS.CMD_ACK_UNAUTH || commKey !== 0) {
+      const authKey = makeCommKey(commKey, zkInstance.jtcp.sessionId);
+      const authReply = await zkInstance.jtcp.executeCmd(COMMANDS.CMD_AUTH, authKey);
+      const authCmdId = authReply.readUInt16LE(0);
+      
+      if (authCmdId !== COMMANDS.CMD_ACK_OK) {
+        throw new Error(`Authentication failed. Code: ${authCmdId}`);
+      }
+    }
+    return zkInstance;
+  }
+
+  async getUsersList(ip: string, commKey: number = 0, page: number = 1, limit: number = 10, searchName?: string): Promise<any> {
     let zkInstance: any;
     try {
-      this.logger.log(`Connecting to ZKTeco device at ${ip} for raw data...`);
-      zkInstance = new ZKLib(ip, 4370, 10000, 4000);
-
-      // Capture connect response to know if unauthenticated (2005)
-      let connectResponseCmd: number = 0;
-      if (zkInstance.jtcp) {
-        zkInstance.jtcp.connect = function() {
-          return new Promise(async (resolve, reject) => {
-            try {
-              const { COMMANDS } = require('zkh-lib/src/command');
-              const reply = await this.executeCmd(COMMANDS.CMD_CONNECT, '');
-              if (reply) {
-                connectResponseCmd = reply.readUInt16LE(0);
-                resolve(true);
-              } else {
-                reject(new Error('NO_REPLY_ON_CMD_CONNECT'));
-              }
-            } catch (err) {
-              reject(err);
-            }
-          });
-        };
-      }
-
-      await zkInstance.createSocket();
-      this.logger.log('Connected to ZKTeco successfully for raw data.');
-
-      patchZKInstance(zkInstance);
-
-      const { COMMANDS } = require('zkh-lib/src/command');
-      if (connectResponseCmd === COMMANDS.CMD_ACK_UNAUTH || commKey !== 0) {
-        this.logger.log(`Device requires authentication. Sending CMD_AUTH...`);
-        const authKey = makeCommKey(commKey, zkInstance.jtcp.sessionId);
-        const authReply = await zkInstance.jtcp.executeCmd(COMMANDS.CMD_AUTH, authKey);
-        const authCmdId = authReply.readUInt16LE(0);
-        
-        if (authCmdId !== COMMANDS.CMD_ACK_OK) {
-          throw new Error(`Authentication failed with ZKTeco device. Code: ${authCmdId}`);
-        }
-      }
-
-      this.logger.log('Fetching users and logs...');
+      zkInstance = await this.connectToDevice(ip, commKey);
       const usersData = await zkInstance.getUsers();
-      const logsData = await zkInstance.getAttendances();
-
       await zkInstance.disconnect();
 
-      let logs = logsData?.data || [];
+      let users = usersData?.data || [];
 
-      // Filter if month and year are provided
-      if (month && year) {
-        const targetMonthStart = new Date(year, month - 1, 1);
-        const targetMonthEnd = endOfMonth(targetMonthStart);
+      if (searchName) {
+        const lowerSearch = searchName.toLowerCase();
+        users = users.filter((u: any) => u.name && u.name.toLowerCase().includes(lowerSearch));
+      }
 
-        logs = logs.filter((log: any) => {
-          const recordDate = typeof log.recordTime === 'string' ? parseISO(log.recordTime) : new Date(log.recordTime);
-          return isWithinInterval(recordDate, { start: targetMonthStart, end: targetMonthEnd });
+      const total = users.length;
+      const startIndex = (page - 1) * limit;
+      const paginatedUsers = users.slice(startIndex, startIndex + limit);
+
+      return {
+        data: paginatedUsers.map((u: any) => ({
+          id: u.uid,
+          userId: u.userId ?? u.userid ?? u.uid,
+          role: u.role,
+          name: u.name,
+          password: u.password
+        })),
+        total,
+        page,
+        limit
+      };
+    } catch (error: any) {
+      if (zkInstance) try { await zkInstance.disconnect(); } catch (e) {}
+      throw new Error(`Lỗi khi lấy danh sách user: ${error.message || error}`);
+    }
+  }
+
+  async getUserByUserId(ip: string, commKey: number = 0, userId: string): Promise<any> {
+    let zkInstance: any;
+    try {
+      zkInstance = await this.connectToDevice(ip, commKey);
+      const usersData = await zkInstance.getUsers();
+      await zkInstance.disconnect();
+
+      const users = usersData?.data || [];
+      const user = users.find((u: any) => (u.userId ?? u.userid ?? u.uid)?.toString() === userId.toString());
+
+      if (!user) return null;
+
+      return {
+        id: user.uid,
+        userId: user.userId ?? user.userid ?? user.uid,
+        role: user.role,
+        name: user.name,
+        password: user.password
+      };
+    } catch (error: any) {
+      if (zkInstance) try { await zkInstance.disconnect(); } catch (e) {}
+      throw new Error(`Lỗi khi tìm user: ${error.message || error}`);
+    }
+  }
+
+  async getAttendanceByUserId(ip: string, commKey: number = 0, userId: string, day?: number, month?: number, year?: number): Promise<any> {
+    let zkInstance: any;
+    try {
+      zkInstance = await this.connectToDevice(ip, commKey);
+      const usersData = await zkInstance.getUsers();
+      const logsData = await zkInstance.getAttendances();
+      await zkInstance.disconnect();
+
+      const usersMap = new Map<string, string>();
+      if (usersData && usersData.data) {
+        usersData.data.forEach((u: any) => {
+          const uid = (u.userId ?? u.userid ?? u.uid ?? '').toString();
+          if (uid) usersMap.set(uid, u.name || `User ${uid}`);
         });
       }
 
+      let logs = logsData?.data || [];
+
+      // Filter by userId
+      logs = logs.filter((log: any) => {
+        if (log.deviceUserId === undefined || log.deviceUserId === null) return false;
+        return log.deviceUserId.toString() === userId.toString();
+      });
+
+      // Process all logs for this user
+      let processedRows = processAttendanceData(logs, usersMap);
+
+      // Filter processed records by day, month, year
+      if (day || month || year) {
+        processedRows = processedRows.filter(row => {
+          const rowDate = parseISO(row.date); // row.date is 'yyyy-MM-dd' from processAttendanceData
+          let match = true;
+          if (year && rowDate.getFullYear() !== year) match = false;
+          // getMonth() is 0-indexed
+          if (month && (rowDate.getMonth() + 1) !== month) match = false;
+          if (day && rowDate.getDate() !== day) match = false;
+          return match;
+        });
+      }
+
+      // Sort chronological
+      processedRows.sort((a, b) => a.date.localeCompare(b.date));
+
       return {
-        users: usersData?.data || [],
-        logs: logs
+        userId,
+        name: usersMap.get(userId.toString()) || `User ${userId}`,
+        attendances: processedRows
       };
     } catch (error: any) {
-      this.logger.error('Error fetching raw data from ZKTeco', error);
-      if (zkInstance) {
-        try { await zkInstance.disconnect(); } catch (e) {}
-      }
-      const errMsg = error.err?.message || error.message || error;
-      throw new Error(`Lỗi khi lấy JSON từ máy chấm công: ${errMsg}`);
+      if (zkInstance) try { await zkInstance.disconnect(); } catch (e) {}
+      throw new Error(`Lỗi khi lấy chấm công user: ${error.message || error}`);
     }
   }
 }
