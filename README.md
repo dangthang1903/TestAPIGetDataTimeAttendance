@@ -58,7 +58,7 @@ Lệnh này sẽ dùng `concurrently` để chạy song song 2 luồng:
 
 ## 📦 Hướng Dẫn Đóng Gói Ra File Cài Đặt (.exe cho Windows / .dmg cho Mac)
 
-Bản chất phần mềm sử dụng công nghệ **Electron** nên mã nguồn này có thể chạy và đóng gói được trên cả Windows, macOS và Linux. Tuy nhiên, file bạn vừa đóng gói ra có đuôi `.exe` **chỉ có thể chạy trên Windows**. 
+Bản chất phần mềm sử dụng công nghệ **Electron** nên mã nguồn này có thể chạy và đóng gói được trên cả Windows, macOS và Linux.
 
 Để tạo file cài đặt cho nền tảng nào, hệ thống sẽ gọi lệnh tương ứng:
 
@@ -70,7 +70,7 @@ npm run build:app
 *Kết quả:* File `.exe` sẽ xuất hiện trong thư mục `release/`.
 
 ### 2. Build cho Macbook (.dmg / .app)
-**Lưu ý:** Để build ra app cho Mac, bạn bắt buộc phải **chạy lệnh này trên một máy tính Macbook** (vì Apple yêu cầu hệ điều hành macOS mới đóng gói được file `.dmg` chuẩn của họ). Người bạn dùng Macbook của bạn sau khi pull code về chỉ cần gõ:
+**Lưu ý:** Để build ra app cho Mac, bạn bắt buộc phải **chạy lệnh này trên một máy tính Macbook** (vì Apple yêu cầu hệ điều hành macOS mới đóng gói được file `.dmg` chuẩn của họ).
 ```bash
 npm run build:mac
 ```
