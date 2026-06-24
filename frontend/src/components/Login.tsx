@@ -19,8 +19,8 @@ export default function Login({ onConnect }: LoginProps) {
     setError('');
     
     try {
-      await axios.get('/attendance/users', {
-        params: { ip: targetIp, commKey: targetCommKey, page: 1, limit: 1 }
+      await axios.get('/attendance/ping', {
+        params: { ip: targetIp, commKey: targetCommKey }
       });
       onConnect({ ip: targetIp, commKey: targetCommKey });
     } catch (err: any) {
